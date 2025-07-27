@@ -1,4 +1,4 @@
-name = "http-proxy"
+name = "http-proxy2"
 main = "src/index.js"
 compatibility_date = "2024-01-15"
 compatibility_flags = ["nodejs_compat"]
