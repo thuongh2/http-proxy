@@ -21,13 +21,14 @@ async function handleRequest(request) {
     // Log incoming request (single log entry)
     console.log(`[${requestId}] REQUEST: ${request.method} ${url.pathname}${url.search} | User-Agent: ${request.headers.get('user-agent') || 'unknown'} | IP: ${request.headers.get('cf-connecting-ip') || 'unknown'}`)
     
-    // Basic Authentication Check
+    // Proxy Authentication Check (using custom header)
     const requireAuth = getEnvVar('REQUIRE_AUTH', 'true') === 'true'
     if (requireAuth && !isAuthenticated(request)) {
       const response = new Response('Unauthorized', {
         status: 401,
         headers: {
           'WWW-Authenticate': 'Basic realm="Proxy API"',
+          'X-Proxy-Auth-Required': 'true',
           'Access-Control-Allow-Origin': '*'
         }
       })
@@ -84,7 +85,13 @@ function isAuthenticated(request) {
   const requireAuth = getEnvVar('REQUIRE_AUTH', 'true') === 'true'
   if (!requireAuth) return true
   
-  const authHeader = request.headers.get('Authorization')
+  // Check for custom proxy authorization header first
+  const proxyAuthHeader = request.headers.get('X-Proxy-Authorization') || 
+                         request.headers.get('Proxy-Authorization')
+  
+  // Fallback to standard Authorization header if custom header not found
+  const authHeader = proxyAuthHeader
+  
   if (!authHeader || !authHeader.startsWith('Basic ')) {
     return false
   }
@@ -152,11 +159,25 @@ function buildFinalTargetUrl(targetUrl, originalUrl) {
 function createProxyRequest(request, finalTargetUrl, originalUrl) {
   const proxyHeaders = new Headers(request.headers)
   
-  // Remove Cloudflare-specific headers
+  // Remove Cloudflare-specific headers and proxy auth headers
   const headersToRemove = [
     'cf-connecting-ip', 'cf-ray', 'cf-visitor', 'cf-ipcountry',
-    'x-target-url', 'authorization' // Remove auth header from proxied request
+    'x-target-url', 
+    // Remove custom proxy authorization headers after successful auth
+    'x-proxy-authorization', 'proxy-authorization'
   ]
+  
+  // Only remove standard Authorization header if it was used for proxy auth
+  // (when no custom proxy auth header was provided)
+  const hasCustomProxyAuth = request.headers.get('X-Proxy-Authorization') || 
+                            request.headers.get('Proxy-Authorization')
+  
+  if (!hasCustomProxyAuth) {
+    // If standard Authorization was used for proxy auth, remove it
+    // so it doesn't interfere with target API's auth
+    headersToRemove.push('authorization')
+  }
+  
   headersToRemove.forEach(header => proxyHeaders.delete(header))
   
   // Add forwarding headers
@@ -210,6 +231,7 @@ function handleCORS() {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, PATCH, OPTIONS',
       'Access-Control-Allow-Headers': '*',
+      'Access-Control-Expose-Headers': '*',
       'Access-Control-Max-Age': '86400'
     }
   })
