@@ -172,15 +172,33 @@ function handleCORS() {
 addEventListener('fetch', event => {
   const url = new URL(event.request.url)
   if (url.pathname === '/health' || url.pathname === '/ping') {
+    const requestId = generateRequestId()
+    console.log(`[${requestId}] Health check request`)
+    
     event.respondWith(new Response(JSON.stringify({
       status: 'healthy',
       timestamp: new Date().toISOString(),
-      service: 'HTTP Proxy Worker'
+      service: 'HTTP Proxy Worker',
+      requestId: requestId
     }), {
       headers: {
         'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*'
+        'Access-Control-Allow-Origin': '*',
+        'X-Request-ID': requestId
       }
     }))
   }
 })
+
+// Utility functions
+function generateRequestId() {
+  return Math.random().toString(36).substr(2, 9) + '-' + Date.now().toString(36)
+}
+
+function logResponse(requestId, response, startTime) {
+  const totalTime = Date.now() - startTime
+  console.log(`[${requestId}] Response: ${response.status} ${response.statusText || ''}`)
+  console.log(`[${requestId}] Total time: ${totalTime}ms`)
+  console.log(`[${requestId}] Response headers:`, Object.fromEntries(response.headers.entries()))
+  console.log(`[${requestId}] ==========================================`)
+}
