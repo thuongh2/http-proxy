@@ -15,6 +15,9 @@ name = "http-proxy-dev"
 [vars]
 ENVIRONMENT = "production"
 
+[observability.logs]
+enabled = true
+
 # Triggers - khi nào worker sẽ chạy
 [[triggers]]
 pattern = "*/*"
