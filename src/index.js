@@ -1,159 +1,206 @@
+// Configuration will be loaded from environment variables
+
 addEventListener('fetch', event => {
+  const url = new URL(event.request.url)
+  
+  // Health check endpoints - no auth required
+  if (url.pathname === '/health' || url.pathname === '/ping') {
+    event.respondWith(handleHealthCheck(event.request))
+    return
+  }
+  
   event.respondWith(handleRequest(event.request))
 })
 
 async function handleRequest(request) {
   const startTime = Date.now()
-  const url = new URL(request.url)
   const requestId = generateRequestId()
-  
-  // Log incoming request
-  console.log(`[${requestId}] Incoming: ${request.method} ${url.pathname}${url.search}`)
-  console.log(`[${requestId}] Headers:`, Object.fromEntries(request.headers.entries()))
-  console.log(`[${requestId}] User-Agent:`, request.headers.get('user-agent') || 'unknown')
-  console.log(`[${requestId}] CF-Connecting-IP:`, request.headers.get('cf-connecting-ip') || 'unknown')
-  
-  // Xử lý OPTIONS request cho CORS
-  if (request.method === 'OPTIONS') {
-    console.log(`[${requestId}] CORS preflight request`)
-    const response = handleCORS()
-    logResponse(requestId, response, startTime)
-    return response
-  }
-  
-  // Lấy target URL từ query parameter hoặc header
-  let targetUrl = url.searchParams.get('url') || 
-                  url.searchParams.get('target') ||
-                  request.headers.get('X-Target-URL')
-  
-  // Nếu không có target URL, trả về hướng dẫn sử dụng
-  if (!targetUrl) {
-    console.log(`[${requestId}] ERROR: Missing target URL`)
-    const response = new Response(JSON.stringify({
-      error: 'Missing target URL',
-      usage: {
-        method1: 'Add ?url=https://example.com to your request',
-        method2: 'Add ?target=https://example.com to your request', 
-        method3: 'Add X-Target-URL header with target URL',
-        example: 'https://your-worker.workers.dev?url=https://jsonplaceholder.typicode.com/posts'
-      }
-    }), {
-      status: 400,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*'
-      }
-    })
-    logResponse(requestId, response, startTime)
-    return response
-  }
-  
-  // Validate URL
-  try {
-    new URL(targetUrl)
-    console.log(`[${requestId}] Target URL: ${targetUrl}`)
-  } catch (e) {
-    console.log(`[${requestId}] ERROR: Invalid target URL: ${targetUrl}`)
-    const response = new Response(JSON.stringify({
-      error: 'Invalid target URL',
-      provided: targetUrl
-    }), {
-      status: 400,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*'
-      }
-    })
-    logResponse(requestId, response, startTime)
-    return response
-  }
-  
-  // Xóa proxy parameters khỏi URL
-  const cleanUrl = new URL(request.url)
-  cleanUrl.searchParams.delete('url')
-  cleanUrl.searchParams.delete('target')
-  
-  // Tạo target URL với path và query string
-  const finalTargetUrl = new URL(targetUrl)
-  finalTargetUrl.pathname = cleanUrl.pathname === '/' ? finalTargetUrl.pathname : cleanUrl.pathname
-  finalTargetUrl.search = cleanUrl.search
-  
-  // Copy headers và xử lý
-  const proxyHeaders = new Headers(request.headers)
-  
-  // Xóa headers không cần thiết
-  proxyHeaders.delete('cf-connecting-ip')
-  proxyHeaders.delete('cf-ray')
-  proxyHeaders.delete('cf-visitor')
-  proxyHeaders.delete('cf-ipcountry')
-  proxyHeaders.delete('x-target-url')
-  
-  // Thêm headers proxy thông tin
-  proxyHeaders.set('X-Forwarded-For', request.headers.get('CF-Connecting-IP') || 'unknown')
-  proxyHeaders.set('X-Forwarded-Proto', 'https')
-  proxyHeaders.set('X-Forwarded-Host', url.hostname)
+  const url = new URL(request.url)
   
   try {
-    // Tạo và gửi request
-    const proxyRequest = new Request(finalTargetUrl.toString(), {
-      method: request.method,
-      headers: proxyHeaders,
-      body: request.method !== 'GET' && request.method !== 'HEAD' ? request.body : null
-    })
+    // Log incoming request (single log entry)
+    console.log(`[${requestId}] REQUEST: ${request.method} ${url.pathname}${url.search} | User-Agent: ${request.headers.get('user-agent') || 'unknown'} | IP: ${request.headers.get('cf-connecting-ip') || 'unknown'}`)
     
-    console.log(`[${requestId}] Proxying to: ${finalTargetUrl.toString()}`)
-    console.log(`[${requestId}] Proxy headers:`, Object.fromEntries(proxyHeaders.entries()))
+    // Basic Authentication Check
+    const requireAuth = getEnvVar('REQUIRE_AUTH', 'true') === 'true'
+    if (requireAuth && !isAuthenticated(request)) {
+      const response = new Response('Unauthorized', {
+        status: 401,
+        headers: {
+          'WWW-Authenticate': 'Basic realm="Proxy API"',
+          'Access-Control-Allow-Origin': '*'
+        }
+      })
+      logResponse(requestId, response, startTime, 'AUTH_FAILED')
+      return response
+    }
     
+    // Handle CORS preflight
+    if (request.method === 'OPTIONS') {
+      const response = handleCORS()
+      logResponse(requestId, response, startTime, 'CORS_PREFLIGHT')
+      return response
+    }
+    
+    // Get target URL
+    const targetUrl = getTargetUrl(url, request.headers)
+    if (!targetUrl.success) {
+      const response = createErrorResponse(targetUrl.error, 400)
+      logResponse(requestId, response, startTime, 'INVALID_TARGET')
+      return response
+    }
+    
+    // Build final target URL
+    const finalTargetUrl = buildFinalTargetUrl(targetUrl.url, url)
+    
+    // Create and send proxy request
+    const proxyRequest = createProxyRequest(request, finalTargetUrl, url)
     const fetchStart = Date.now()
     const response = await fetch(proxyRequest)
     const fetchTime = Date.now() - fetchStart
     
-    console.log(`[${requestId}] Target response: ${response.status} ${response.statusText}`)
-    console.log(`[${requestId}] Target response time: ${fetchTime}ms`)
-    console.log(`[${requestId}] Target response headers:`, Object.fromEntries(response.headers.entries()))
+    // Create proxy response with CORS headers
+    const proxyResponse = createProxyResponse(response, targetUrl.url, requestId, fetchTime)
     
-    // Copy response
-    const proxyResponse = new Response(response.body, {
-      status: response.status,
-      statusText: response.statusText,
-      headers: response.headers
-    })
-    
-    // Thêm CORS headers
-    proxyResponse.headers.set('Access-Control-Allow-Origin', '*')
-    proxyResponse.headers.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS')
-    proxyResponse.headers.set('Access-Control-Allow-Headers', '*')
-    proxyResponse.headers.set('Access-Control-Expose-Headers', '*')
-    
-    // Thêm proxy info headers
-    proxyResponse.headers.set('X-Proxy-By', 'Cloudflare-Worker')
-    proxyResponse.headers.set('X-Target-URL', targetUrl)
-    proxyResponse.headers.set('X-Request-ID', requestId)
-    proxyResponse.headers.set('X-Proxy-Time', `${fetchTime}ms`)
-    
-    logResponse(requestId, proxyResponse, startTime)
+    logResponse(requestId, proxyResponse, startTime, 'SUCCESS', fetchTime)
     return proxyResponse
     
   } catch (error) {
-    console.log(`[${requestId}] ERROR: Proxy request failed - ${error.message}`)
-    console.log(`[${requestId}] Error stack:`, error.stack)
+    // Log error
+    console.error(`[${requestId}] ERROR: ${error.message} | Stack: ${error.stack}`)
     
-    const response = new Response(JSON.stringify({
+    const response = createErrorResponse({
       error: 'Proxy request failed',
       message: error.message,
-      target: finalTargetUrl.toString(),
       requestId: requestId
-    }), {
-      status: 502,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*',
-        'X-Request-ID': requestId
-      }
-    })
-    logResponse(requestId, response, startTime)
+    }, 502)
+    
+    logResponse(requestId, response, startTime, 'ERROR')
     return response
   }
+}
+
+function isAuthenticated(request) {
+  const requireAuth = getEnvVar('REQUIRE_AUTH', 'true') === 'true'
+  if (!requireAuth) return true
+  
+  const authHeader = request.headers.get('Authorization')
+  if (!authHeader || !authHeader.startsWith('Basic ')) {
+    return false
+  }
+  
+  try {
+    const credentials = atob(authHeader.slice(6))
+    const [username, password] = credentials.split(':')
+    
+    // Get credentials from environment variables
+    const validUser = getEnvVar('BASIC_AUTH_USER', 'admin')
+    const validPass = getEnvVar('BASIC_AUTH_PASS', 'password')
+    
+    return username === validUser && password === validPass
+  } catch (e) {
+    return false
+  }
+}
+
+function getTargetUrl(url, headers) {
+  const targetUrl = url.searchParams.get('url') || 
+                   url.searchParams.get('target') ||
+                   headers.get('X-Target-URL')
+  
+  if (!targetUrl) {
+    return {
+      success: false,
+      error: {
+        error: 'Missing target URL',
+        usage: {
+          method1: 'Add ?url=https://example.com to your request',
+          method2: 'Add ?target=https://example.com to your request', 
+          method3: 'Add X-Target-URL header with target URL',
+          example: 'https://your-worker.workers.dev?url=https://jsonplaceholder.typicode.com/posts'
+        }
+      }
+    }
+  }
+  
+  try {
+    new URL(targetUrl)
+    return { success: true, url: targetUrl }
+  } catch (e) {
+    return {
+      success: false,
+      error: {
+        error: 'Invalid target URL',
+        provided: targetUrl
+      }
+    }
+  }
+}
+
+function buildFinalTargetUrl(targetUrl, originalUrl) {
+  const cleanUrl = new URL(originalUrl)
+  cleanUrl.searchParams.delete('url')
+  cleanUrl.searchParams.delete('target')
+  
+  const finalTargetUrl = new URL(targetUrl)
+  finalTargetUrl.pathname = cleanUrl.pathname === '/' ? finalTargetUrl.pathname : cleanUrl.pathname
+  finalTargetUrl.search = cleanUrl.search
+  
+  return finalTargetUrl
+}
+
+function createProxyRequest(request, finalTargetUrl, originalUrl) {
+  const proxyHeaders = new Headers(request.headers)
+  
+  // Remove Cloudflare-specific headers
+  const headersToRemove = [
+    'cf-connecting-ip', 'cf-ray', 'cf-visitor', 'cf-ipcountry',
+    'x-target-url', 'authorization' // Remove auth header from proxied request
+  ]
+  headersToRemove.forEach(header => proxyHeaders.delete(header))
+  
+  // Add forwarding headers
+  proxyHeaders.set('X-Forwarded-For', request.headers.get('CF-Connecting-IP') || 'unknown')
+  proxyHeaders.set('X-Forwarded-Proto', 'https')
+  proxyHeaders.set('X-Forwarded-Host', originalUrl.hostname)
+  
+  return new Request(finalTargetUrl.toString(), {
+    method: request.method,
+    headers: proxyHeaders,
+    body: request.method !== 'GET' && request.method !== 'HEAD' ? request.body : null
+  })
+}
+
+function createProxyResponse(response, targetUrl, requestId, fetchTime) {
+  const proxyResponse = new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers
+  })
+  
+  // Add CORS headers
+  proxyResponse.headers.set('Access-Control-Allow-Origin', '*')
+  proxyResponse.headers.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS')
+  proxyResponse.headers.set('Access-Control-Allow-Headers', '*')
+  proxyResponse.headers.set('Access-Control-Expose-Headers', '*')
+  
+  // Add proxy info headers
+  proxyResponse.headers.set('X-Proxy-By', 'Cloudflare-Worker')
+  proxyResponse.headers.set('X-Target-URL', targetUrl)
+  proxyResponse.headers.set('X-Request-ID', requestId)
+  proxyResponse.headers.set('X-Proxy-Time', `${fetchTime}ms`)
+  
+  return proxyResponse
+}
+
+function createErrorResponse(errorData, status) {
+  return new Response(JSON.stringify(errorData), {
+    status: status,
+    headers: {
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*'
+    }
+  })
 }
 
 function handleCORS() {
@@ -168,37 +215,39 @@ function handleCORS() {
   })
 }
 
-// Health check endpoint
-addEventListener('fetch', event => {
-  const url = new URL(event.request.url)
-  if (url.pathname === '/health' || url.pathname === '/ping') {
-    const requestId = generateRequestId()
-    console.log(`[${requestId}] Health check request`)
-    
-    event.respondWith(new Response(JSON.stringify({
-      status: 'healthy',
-      timestamp: new Date().toISOString(),
-      service: 'HTTP Proxy Worker',
-      requestId: requestId
-    }), {
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*',
-        'X-Request-ID': requestId
-      }
-    }))
-  }
-})
+async function handleHealthCheck(request) {
+  const requestId = generateRequestId()
+  const requireAuth = getEnvVar('REQUIRE_AUTH', 'true') === 'true'
+  const environment = getEnvVar('ENVIRONMENT', 'production')
+  
+  return new Response(JSON.stringify({
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    service: 'HTTP Proxy Worker',
+    environment: environment,
+    requestId: requestId,
+    auth_required: requireAuth
+  }), {
+    headers: {
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*',
+      'X-Request-ID': requestId
+    }
+  })
+}
 
-// Utility functions
 function generateRequestId() {
   return Math.random().toString(36).substr(2, 9) + '-' + Date.now().toString(36)
 }
 
-function logResponse(requestId, response, startTime) {
+function logResponse(requestId, response, startTime, status, fetchTime = null) {
   const totalTime = Date.now() - startTime
-  console.log(`[${requestId}] Response: ${response.status} ${response.statusText || ''}`)
-  console.log(`[${requestId}] Total time: ${totalTime}ms`)
-  console.log(`[${requestId}] Response headers:`, Object.fromEntries(response.headers.entries()))
-  console.log(`[${requestId}] ==========================================`)
+  const fetchTimeStr = fetchTime ? ` | Fetch: ${fetchTime}ms` : ''
+  console.log(`[${requestId}] RESPONSE: ${response.status} ${response.statusText || ''} | Status: ${status} | Total: ${totalTime}ms${fetchTimeStr}`)
+}
+
+// Utility function to get environment variables
+function getEnvVar(name, defaultValue = null) {
+  // In Cloudflare Workers, environment variables are available on globalThis
+  return globalThis[name] || defaultValue
 }

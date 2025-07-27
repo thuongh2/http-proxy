@@ -3,32 +3,45 @@ main = "src/index.js"
 compatibility_date = "2024-01-15"
 compatibility_flags = ["nodejs_compat"]
 
-# Cấu hình cho production
-[env.production]
-name = "http-proxy-prod"
-
-# Cấu hình cho development  
-[env.development]
-name = "http-proxy-dev"
-
-# Variables (optional)
+# Global environment variables
 [vars]
 ENVIRONMENT = "production"
+REQUIRE_AUTH = "true"
 
+# Secret environment variables (use wrangler secret commands)
+# Run these commands to set secrets:
+# wrangler secret put BASIC_AUTH_USER
+# wrangler secret put BASIC_AUTH_PASS
+
+# Production environment
+[env.production]
+name = "http-proxy-prod"
+[env.production.vars]
+ENVIRONMENT = "production"
+REQUIRE_AUTH = "true"
+
+# Development environment  
+[env.development]
+name = "http-proxy-dev"
+[env.development.vars]
+ENVIRONMENT = "development"
+REQUIRE_AUTH = "false"  # Disable auth in development
+
+# Observability
 [observability.logs]
 enabled = true
 
-# Triggers - khi nào worker sẽ chạy
+# Triggers - when the worker will run
 [[triggers]]
 pattern = "*/*"
-zone_name = "hoaithuong.id.vn"  # Thay bằng domain của bạn (optional)
+zone_name = "hoaithuong.id.vn"
 
-# KV Storage (nếu cần)
+# KV Storage (if needed)
 # [[kv_namespaces]]
 # binding = "CACHE"
 # id = "your-kv-namespace-id"
 
-# Durable Objects (nếu cần)
+# Durable Objects (if needed)
 # [[durable_objects.bindings]]
 # name = "COUNTER"
 # class_name = "Counter"
